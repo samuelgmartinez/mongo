@@ -62,10 +62,9 @@ namespace mongo {
            @param deps output parameter
            @param path path to self if all ancestors are ExpressionObjects.
                        Top-level ExpressionObject gets pointer to empty vector.
-                       If any other Expression is an ancestor {a:1} object
-                       aren't allowed, so they get NULL
-
-
+                       If any other Expression is an ancestor, or in other cases
+                       where {a:1} inclusion objects aren't allowed, they get
+                       NULL.
          */
         virtual void addDependencies(set<string>& deps, vector<string>* path=NULL) const = 0;
 
@@ -96,7 +95,7 @@ namespace mongo {
             field specification;  See ExpressionConstant.
          */
         virtual void addToBsonObj(
-            BSONObjBuilder *pBuilder, string fieldName,
+            BSONObjBuilder *pBuilder, const std::string& fieldName,
             bool requireExpression) const = 0;
 
         /*
@@ -225,7 +224,7 @@ namespace mongo {
         // virtuals from Expression
         virtual intrusive_ptr<Expression> optimize();
         virtual void addToBsonObj(
-            BSONObjBuilder *pBuilder, string fieldName,
+            BSONObjBuilder *pBuilder, const std::string& fieldName,
             bool requireExpression) const;
         virtual void addToBsonArray(BSONArrayBuilder *pBuilder) const;
         virtual void addDependencies(set<string>& deps, vector<string>* path=NULL) const;
@@ -369,7 +368,7 @@ namespace mongo {
         virtual intrusive_ptr<const Value> evaluate(
             const intrusive_ptr<Document> &pDocument) const;
         virtual void addToBsonObj(
-            BSONObjBuilder *pBuilder, string fieldName,
+            BSONObjBuilder *pBuilder, const std::string& fieldName,
             bool requireExpression) const;
         virtual void addToBsonArray(BSONArrayBuilder *pBuilder) const;
 
@@ -399,7 +398,7 @@ namespace mongo {
           Provide for conformance with the uniform function pointer signature
           required for parsing.
 
-          These create a particular comparision operand, without any
+          These create a particular comparison operand, without any
           operands.  Those must be added via ExpressionNary::addOperand().
         */
         static intrusive_ptr<ExpressionNary> createCmp();
@@ -446,7 +445,7 @@ namespace mongo {
             const intrusive_ptr<Document> &pDocument) const;
         virtual const char *getOpName() const;
         virtual void addToBsonObj(
-            BSONObjBuilder *pBuilder, string fieldName,
+            BSONObjBuilder *pBuilder, const std::string& fieldName,
             bool requireExpression) const;
         virtual void addToBsonArray(BSONArrayBuilder *pBuilder) const;
 
@@ -548,7 +547,7 @@ namespace mongo {
         virtual intrusive_ptr<const Value> evaluate(
             const intrusive_ptr<Document> &pDocument) const;
         virtual void addToBsonObj(
-            BSONObjBuilder *pBuilder, string fieldName,
+            BSONObjBuilder *pBuilder, const std::string& fieldName,
             bool requireExpression) const;
         virtual void addToBsonArray(BSONArrayBuilder *pBuilder) const;
 
@@ -618,7 +617,7 @@ namespace mongo {
         virtual intrusive_ptr<const Value> evaluate(
             const intrusive_ptr<Document> &pDocument) const;
         virtual void addToBsonObj(
-            BSONObjBuilder *pBuilder, string fieldName,
+            BSONObjBuilder *pBuilder, const std::string& fieldName,
             bool requireExpression) const;
         virtual void addToBsonArray(BSONArrayBuilder *pBuilder) const;
         virtual void toMatcherBson(BSONObjBuilder *pBuilder) const;
@@ -835,10 +834,11 @@ namespace mongo {
         virtual intrusive_ptr<Expression> optimize();
         virtual bool isSimple();
         virtual void addDependencies(set<string>& deps, vector<string>* path=NULL) const;
+        /** Only evaluates non inclusion expressions.  For inclusions, use addToDocument(). */
         virtual intrusive_ptr<const Value> evaluate(
             const intrusive_ptr<Document> &pDocument) const;
         virtual void addToBsonObj(
-            BSONObjBuilder *pBuilder, string fieldName,
+            BSONObjBuilder *pBuilder, const std::string& fieldName,
             bool requireExpression) const;
         virtual void addToBsonArray(BSONArrayBuilder *pBuilder) const;
 

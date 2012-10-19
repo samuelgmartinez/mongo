@@ -31,6 +31,7 @@
 
 #include "mongo/db/dbhelpers.h"
 #include "../db/commands.h"
+#include "mongo/db/hasher.h"
 #include "../db/jsobj.h"
 #include "../db/cmdline.h"
 #include "../db/queryoptimizer.h"
@@ -40,6 +41,7 @@
 #include "../db/clientcursor.h"
 #include "../db/pagefault.h"
 #include "../db/repl.h"
+#include "../db/kill_current_op.h"
 
 #include "../client/connpool.h"
 #include "../client/distlock.h"
@@ -193,6 +195,9 @@ namespace mongo {
             ShardForceVersionOkModeBlock sf;
             {
                 RemoveSaver rs("moveChunk",ns,"post-cleanup");
+
+                log() << "moveChunk starting delete for: " << this->toString() << migrateLog;
+
                 long long numDeleted =
                         Helpers::removeRange( ns ,
                                               min ,
@@ -202,7 +207,9 @@ namespace mongo {
                                               secondaryThrottle ,
                                               cmdLine.moveParanoia ? &rs : 0 , /*callback*/
                                               true ); /*fromMigrate*/
-                log() << "moveChunk deleted: " << numDeleted << migrateLog;
+
+                log() << "moveChunk deleted " << numDeleted << " documents for "
+                      << this->toString() << migrateLog;
             }
             
             
@@ -240,9 +247,12 @@ namespace mongo {
 
     };
 
-    bool isInRange( const BSONObj& obj , const BSONObj& min , const BSONObj& max ) {
-        BSONObj k = obj.extractFields( min, true );
-
+    bool isInRange( const BSONObj& obj ,
+                    const BSONObj& min ,
+                    const BSONObj& max ,
+                    const BSONObj& shardKeyPattern ) {
+        ShardKeyPattern shardKey( shardKeyPattern );
+        BSONObj k = shardKey.extractKey( obj );
         return k.woCompare( min ) >= 0 && k.woCompare( max ) < 0;
     }
 
@@ -256,14 +266,26 @@ namespace mongo {
             _memoryUsed = 0;
         }
 
-        void start( string ns ,
+        /**
+         * @return false if cannot start. One of the reason for not being able to
+         *     start is there is already an existing migration in progress.
+         */
+        bool start( const std::string& ns ,
                     const BSONObj& min ,
                     const BSONObj& max ,
                     const BSONObj& shardKeyPattern ) {
-            scoped_lock ll(_workLock);
+
+            //
+            // Do not hold _workLock
+            //
+
+            //scoped_lock ll(_workLock);
+
             scoped_lock l(_m); // reads and writes _active
 
-            verify( ! _active );
+            if (_active) {
+                return false;
+            }
 
             verify( ! min.isEmpty() );
             verify( ! max.isEmpty() );
@@ -280,6 +302,7 @@ namespace mongo {
             verify( _memoryUsed == 0 );
 
             _active = true;
+            return true;
         }
 
         void done() {
@@ -329,7 +352,7 @@ namespace mongo {
 
             case 'd': {
 
-                if ( getThreadName() == cleanUpThreadName ) {
+                if (getThreadName().find(cleanUpThreadName) == 0) {
                     // we don't want to xfer things we're cleaning
                     // as then they'll be deleted on TO
                     // which is bad
@@ -355,7 +378,7 @@ namespace mongo {
 
             }
 
-            if ( ! isInRange( it , _min , _max ) )
+            if ( ! isInRange( it , _min , _max , _shardKeyPattern ) )
                 return;
 
             _reload.push_back( ide.wrap() );
@@ -437,9 +460,9 @@ namespace mongo {
                 errmsg = (string)"can't find index in storeCurrentLocs" + causedBy( errmsg );
                 return false;
             }
-
+            // Assume both min and max non-empty, append MinKey's to make them fit chosen index
             BSONObj min = Helpers::modifiedRangeBound( _min , idx->keyPattern() , -1 );
-            BSONObj max = Helpers::modifiedRangeBound( _max , idx->keyPattern() , 1 );
+            BSONObj max = Helpers::modifiedRangeBound( _max , idx->keyPattern() , -1 );
 
             BtreeCursor* btreeCursor = BtreeCursor::make( d , *idx , min , max , false , 1 );
             auto_ptr<ClientCursor> cc(
@@ -564,7 +587,7 @@ namespace mongo {
                 }
                 
                 if ( recordToTouch ) {
-                    // its safe to touch here bceause we have a LockMongoFilesShared
+                    // its safe to touch here because we have a LockMongoFilesShared
                     // we can't do where we get the lock because we would have to unlock the main readlock and tne _trackerLocks
                     // simpler to handle this out there
                     recordToTouch->touch();
@@ -650,23 +673,37 @@ namespace mongo {
     } migrateFromStatus;
 
     struct MigrateStatusHolder {
-        MigrateStatusHolder( string ns ,
+        MigrateStatusHolder( const std::string& ns ,
                              const BSONObj& min ,
                              const BSONObj& max ,
                              const BSONObj& shardKeyPattern ) {
-            migrateFromStatus.start( ns , min , max , shardKeyPattern );
+            _isAnotherMigrationActive = !migrateFromStatus.start(ns, min, max, shardKeyPattern);
         }
         ~MigrateStatusHolder() {
-            migrateFromStatus.done();
+            if (!_isAnotherMigrationActive) {
+                migrateFromStatus.done();
+            }
         }
+
+        bool isAnotherMigrationActive() const {
+            return _isAnotherMigrationActive;
+        }
+
+    private:
+        bool _isAnotherMigrationActive;
     };
 
     void _cleanupOldData( OldDataCleanup cleanup ) {
-        Client::initThread( cleanUpThreadName );
+
+        Client::initThread((string(cleanUpThreadName) + string("-") +
+                                                        OID::gen().toString()).c_str());
+
         if (!noauth) {
             cc().getAuthenticationInfo()->authorize("local", internalSecurity.user);
         }
-        log() << " (start) waiting to cleanup " << cleanup << "  # cursors:" << cleanup.initial.size() << migrateLog;
+
+        log() << " (start) waiting to cleanup " << cleanup
+              << ", # cursors remaining: " << cleanup.initial.size() << migrateLog;
 
         int loops = 0;
         Timer t;
@@ -984,6 +1021,11 @@ namespace mongo {
             }
 
             MigrateStatusHolder statusHolder( ns , min , max , shardKeyPattern );
+            if (statusHolder.isAnotherMigrationActive()) {
+                errmsg = "moveChunk is already in progress from this shard";
+                return false;
+            }
+
             {
                 // this gets a read lock, so we know we have a checkpoint for mods
                 if ( ! migrateFromStatus.storeCurrentLocs( maxChunkSize , errmsg , result ) )
@@ -1006,7 +1048,8 @@ namespace mongo {
                                                     res );
                 }
                 catch( DBException& e ){
-                    errmsg = str::stream() << "moveChunk could not contact to: shard " << to << " to start transfer" << causedBy( e );
+                    errmsg = str::stream() << "moveChunk could not contact to: shard "
+                                           << to << " to start transfer" << causedBy( e );
                     warning() << errmsg << endl;
                     return false;
                 }
@@ -1018,6 +1061,7 @@ namespace mongo {
                     verify( res["errmsg"].type() );
                     errmsg += res["errmsg"].String();
                     result.append( "cause" , res );
+                    warning() << errmsg << endl;
                     return false;
                 }
 
@@ -1102,7 +1146,8 @@ namespace mongo {
                 {
                     BSONObj res;
                     scoped_ptr<ScopedDbConnection> connTo(
-                            ScopedDbConnection::getScopedDbConnection( toShard.getConnString() ) );
+                            ScopedDbConnection::getScopedDbConnection( toShard.getConnString(),
+                                                                       10.0 ) );
 
                     bool ok;
 
@@ -1250,7 +1295,8 @@ namespace mongo {
                 try {
                     scoped_ptr<ScopedDbConnection> conn(
                             ScopedDbConnection::getInternalScopedDbConnection(
-                                    shardingState.getConfigServer() ) );
+                                    shardingState.getConfigServer(),
+                                    10.0 ) );
                     ok = conn->get()->runCommand( "config" , cmd , cmdResult );
                     conn->done();
                 }
@@ -1277,7 +1323,8 @@ namespace mongo {
                     try {
                         scoped_ptr<ScopedDbConnection> conn(
                                 ScopedDbConnection::getInternalScopedDbConnection(
-                                        shardingState.getConfigServer() ) );
+                                        shardingState.getConfigServer(),
+                                        10.0 ) );
 
                         // look for the chunk in this shard whose version got bumped
                         // we assume that if that mod made it to the config, the applyOps was successful
@@ -1509,7 +1556,7 @@ namespace mongo {
                         numCloned++;
                         clonedBytes += o.objsize();
 
-                        if ( secondaryThrottle ) {
+                        if ( secondaryThrottle && thisTime > 0 ) {
                             if ( ! waitForReplication( cc().getLastOp(), 2, 60 /* seconds to wait */ ) ) {
                                 warning() << "secondaryThrottle on, but doc insert timed out after 60 seconds, continuing" << endl;
                             }
@@ -1671,17 +1718,23 @@ namespace mongo {
                     // do not apply deletes if they do not belong to the chunk being migrated
                     BSONObj fullObj;
                     if ( Helpers::findById( cc() , ns.c_str() , id, fullObj ) ) {
-                        if ( ! isInRange( fullObj , min , max ) ) {
+                        if ( ! isInRange( fullObj , min , max , shardKeyPattern ) ) {
                             log() << "not applying out of range deletion: " << fullObj << migrateLog;
 
                             continue;
                         }
                     }
 
+                    // id object most likely has form { _id : ObjectId(...) }
+                    // infer from that correct index to use, e.g. { _id : 1 }
+                    BSONObj idIndexPattern;
+                    Helpers::toKeyFormat( id , idIndexPattern );
+
+                    // TODO: create a better interface to remove objects directly
                     Helpers::removeRange( ns ,
                                           id ,
                                           id,
-                                          findShardKeyIndexPattern_locked( ns , shardKeyPattern ), 
+                                          idIndexPattern ,
                                           true , /*maxInclusive*/
                                           false , /* secondaryThrottle */
                                           cmdLine.moveParanoia ? &rs : 0 , /*callback*/
@@ -1843,9 +1896,26 @@ namespace mongo {
             migrateStatus.from = cmdObj["from"].String();
             migrateStatus.min = cmdObj["min"].Obj().getOwned();
             migrateStatus.max = cmdObj["max"].Obj().getOwned();
-            migrateStatus.shardKeyPattern = cmdObj["shardKeyPattern"].Obj().getOwned();
             migrateStatus.secondaryThrottle = cmdObj["secondaryThrottle"].trueValue();
-            
+            if (cmdObj.hasField("shardKeyPattern")) {
+                migrateStatus.shardKeyPattern = cmdObj["shardKeyPattern"].Obj().getOwned();
+            } else {
+                // shardKeyPattern may not be provided if another shard is from pre 2.2
+                // In that case, assume the shard key pattern is the same as the range
+                // specifiers provided.
+                BSONObj keya , keyb;
+                Helpers::toKeyFormat( migrateStatus.min , keya );
+                Helpers::toKeyFormat( migrateStatus.max , keyb );
+                verify( keya == keyb );
+
+                warning() << "No shard key pattern provided by source shard for migration."
+                    " This is likely because the source shard is running a version prior to 2.2."
+                    " Falling back to assuming the shard key matches the pattern of the min and max"
+                    " chunk range specifiers.  Inferred shard key: " << keya << endl;
+
+                migrateStatus.shardKeyPattern = keya.getOwned();
+            }
+
             if ( migrateStatus.secondaryThrottle && ! anyReplEnabled() ) {
                 warning() << "secondaryThrottle asked for, but not replication" << endl;
                 migrateStatus.secondaryThrottle = false;
@@ -1900,13 +1970,23 @@ namespace mongo {
         void run() {
             BSONObj min = BSON( "x" << 1 );
             BSONObj max = BSON( "x" << 5 );
+            BSONObj skey = BSON( "x" << 1 );
 
-            verify( ! isInRange( BSON( "x" << 0 ) , min , max ) );
-            verify( isInRange( BSON( "x" << 1 ) , min , max ) );
-            verify( isInRange( BSON( "x" << 3 ) , min , max ) );
-            verify( isInRange( BSON( "x" << 4 ) , min , max ) );
-            verify( ! isInRange( BSON( "x" << 5 ) , min , max ) );
-            verify( ! isInRange( BSON( "x" << 6 ) , min , max ) );
+            verify( ! isInRange( BSON( "x" << 0 ) , min , max , skey ) );
+            verify( isInRange( BSON( "x" << 1 ) , min , max , skey ) );
+            verify( isInRange( BSON( "x" << 3 ) , min , max , skey ) );
+            verify( isInRange( BSON( "x" << 4 ) , min , max , skey ) );
+            verify( ! isInRange( BSON( "x" << 5 ) , min , max , skey ) );
+            verify( ! isInRange( BSON( "x" << 6 ) , min , max , skey ) );
+
+            BSONObj obj = BSON( "n" << 3 );
+            BSONObj min2 = BSON( "x" << BSONElementHasher::hash64( obj.firstElement() , 0 ) - 2 );
+            BSONObj max2 = BSON( "x" << BSONElementHasher::hash64( obj.firstElement() , 0 ) + 2 );
+            BSONObj hashedKey =  BSON( "x" << "hashed" );
+
+            verify( isInRange( BSON( "x" << 3 ) , min2 , max2 , hashedKey ) );
+            verify( ! isInRange( BSON( "x" << 3 ) , min , max , hashedKey ) );
+            verify( ! isInRange( BSON( "x" << 4 ) , min2 , max2 , hashedKey ) );
 
             LOG(1) << "isInRangeTest passed" << migrateLog;
         }

@@ -95,7 +95,7 @@ namespace mongo {
                                const shared_ptr<const ParsedQuery> &parsedQuery,
                                const BSONObj &startKey,
                                const BSONObj &endKey,
-                               string special ) {
+                               const std::string& special ) {
         auto_ptr<QueryPlan> ret( new QueryPlan( d, idxNo, frsp, originalQuery, order, parsedQuery,
                                                special ) );
         ret->init( originalFrsp, startKey, endKey );
@@ -108,7 +108,7 @@ namespace mongo {
                          const BSONObj &originalQuery,
                          const BSONObj &order,
                          const shared_ptr<const ParsedQuery> &parsedQuery,
-                         string special ) :
+                         const std::string& special ) :
         _d(d),
         _idxNo(idxNo),
         _frs( frsp.frsForIndex( _d, _idxNo ) ),
@@ -1611,7 +1611,13 @@ doneCheckOrder:
             // No matches are possible in the index so the index may be useful.
             return true;   
         }
-        return d->idx( idxNo ).getSpec().suitability( frsp.simplifiedQueryForIndex( d, idxNo, keyPattern ), order ) != USELESS;
+        // Hashed index types can't use simplified query bounds, since they could turn equalities
+        // into ranges, e.g.{$in : [1,2] } into {$gte : 1 , $lte : 2}
+        // TODO: refactor suitability to take a FieldRangeSetPair, and get rid of this special case
+        // See SERVER-5858.
+        BSONObj query = ( d->idx( idxNo ).getSpec().getTypeName() == "hashed" ) ?
+                        frsp.originalQuery() : frsp.simplifiedQueryForIndex( d, idxNo, keyPattern );
+        return d->idx( idxNo ).getSpec().suitability( query, order ) != USELESS;
     }
     
     void QueryUtilIndexed::clearIndexesForPatterns( const FieldRangeSetPair &frsp, const BSONObj &order ) {

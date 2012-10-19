@@ -125,11 +125,20 @@ namespace mongo {
                         startFrom, hasMore ? cc->getId() : 0 );
             }
             else{
+                // Remote cursors are stored remotely, we shouldn't need this around.
+                // TODO: we should probably just make cursor an auto_ptr
+                scoped_ptr<ParallelSortClusteredCursor> cursorDeleter( cursor );
+
                 // TODO:  Better merge this logic.  We potentially can now use the same cursor logic for everything.
                 ShardPtr primary = cursor->getPrimary();
                 verify( primary.get() );
                 DBClientCursorPtr shardCursor = cursor->getShardCursor( *primary );
+
+                // Implicitly stores the cursor in the cache
                 r.reply( *(shardCursor->getMessage()) , shardCursor->originalHost() );
+
+                // We don't want to kill the cursor remotely if there's still data left
+                shardCursor->decouple();
             }
         }
 
@@ -388,7 +397,7 @@ namespace mongo {
                 // Many operations benefit from having the shard key early in the object
                 if( manager ){
                     o = manager->getShardKey().moveToFront(o);
-                    insertsForChunks[manager->findChunk(o)].push_back(o);
+                    insertsForChunks[manager->findChunkForDoc(o)].push_back(o);
                 }
                 else{
                     insertsForChunks[ empty ].push_back(o);
@@ -702,7 +711,7 @@ namespace mongo {
             verify( manager );
             if( ! shardKey.isEmpty() ){
 
-                chunk = manager->findChunk( shardKey );
+                chunk = manager->findIntersectingChunk( shardKey );
                 shard = ShardPtr( new Shard( chunk->getShard() ) );
                 return;
             }

@@ -405,6 +405,8 @@ namespace mongo {
           we can do.
         */
         const size_t n = pAnd->vpOperand.size();
+        // ExpressionNary::optimize() generates an ExpressionConstant for {$and:[]}.
+        verify(n > 0);
         intrusive_ptr<Expression> pLast(pAnd->vpOperand[n - 1]);
         const ExpressionConstant *pConst =
             dynamic_cast<ExpressionConstant *>(pLast.get());
@@ -526,7 +528,7 @@ namespace mongo {
     }
 
     void ExpressionCoerceToBool::addToBsonObj(
-            BSONObjBuilder *pBuilder, string fieldName,
+            BSONObjBuilder *pBuilder, const std::string& fieldName,
             bool requireExpression) const {
         // Serializing as an $and expression which will become a CoerceToBool
         BSONObjBuilder sub (pBuilder->subobjStart(fieldName));
@@ -787,7 +789,7 @@ namespace mongo {
     }
 
     void ExpressionConstant::addToBsonObj(
-        BSONObjBuilder *pBuilder, string fieldName,
+        BSONObjBuilder *pBuilder, const std::string& fieldName,
         bool requireExpression) const {
         /*
           If we don't need an expression, but can use a naked scalar,
@@ -991,6 +993,7 @@ namespace mongo {
 
         return intrusive_ptr<Expression>(this);
     }
+
     bool ExpressionObject::isSimple() {
         for (ExpressionMap::iterator it(_expressions.begin()); it!=_expressions.end(); ++it) {
             if (it->second && !it->second->isSimple())
@@ -1003,7 +1006,7 @@ namespace mongo {
         string pathStr;
         if (path) {
             if (path->empty()) {
-                // we are in the top-level so _id is implicit
+                // we are in the top level of a projection so _id is implicit
                 if (!_excludeId)
                     deps.insert("_id");
             }
@@ -1013,6 +1016,10 @@ namespace mongo {
                 pathStr += '.';
             }
         }
+        else {
+            verify(!_excludeId);
+        }
+        
 
         for (ExpressionMap::const_iterator it(_expressions.begin()); it!=_expressions.end(); ++it) {
             if (it->second) {
@@ -1050,7 +1057,7 @@ namespace mongo {
 
             // This field is not supposed to be in the output (unless it is _id)
             if (exprIter == end) {
-                if (!_excludeId && atRoot && field.first == "_id") {
+                if (!_excludeId && atRoot && field.first == Document::idName) {
                     // _id from the root doc is always included (until exclusion is supported)
                     // not updating doneFields since "_id" isn't in _expressions
                     pResult->addField(field.first, field.second);
@@ -1130,6 +1137,9 @@ namespace mongo {
                 pResult->addField(field.first,
                                     Value::createArray(result));
             }
+            else {
+                verify( false );
+            }
         }
 
         if (doneFields.size() == _expressions.size())
@@ -1178,7 +1188,10 @@ namespace mongo {
         /* create and populate the result */
         intrusive_ptr<Document> pResult(
             Document::create(getSizeHint()));
-        addToDocument(pResult, Document::create(), pDocument);
+        
+        addToDocument(pResult,
+                      Document::create(), // No inclusion field matching.
+                      pDocument);
         return pResult;
     }
 
@@ -1230,6 +1243,7 @@ namespace mongo {
         }
 
         if (fieldPath.getPathLength() == 1) {
+            verify(!haveExpr); // haveExpr case handled above.
             expr = pExpression;
             return;
         }
@@ -1264,7 +1278,7 @@ namespace mongo {
     }
 
     void ExpressionObject::addToBsonObj(
-        BSONObjBuilder *pBuilder, string fieldName,
+        BSONObjBuilder *pBuilder, const std::string& fieldName,
         bool requireExpression) const {
 
         BSONObjBuilder objBuilder (pBuilder->subobjStart(fieldName));
@@ -1377,7 +1391,7 @@ namespace mongo {
     }
 
     void ExpressionFieldPath::addToBsonObj(
-        BSONObjBuilder *pBuilder, string fieldName,
+        BSONObjBuilder *pBuilder, const std::string& fieldName,
         bool requireExpression) const {
         pBuilder->append(fieldName, fieldPath.getPath(true));
     }
@@ -1446,6 +1460,9 @@ namespace mongo {
             return;
         }
 
+        // FIXME Append constant values using the $const operator.  SERVER-6769
+
+        // FIXME This checks pointer equality not value equality.
         if (pRange->pTop.get() == pRange->pBottom.get()) {
             BSONArrayBuilder operands;
             pFieldPath->addToBsonArray(&operands);
@@ -1496,7 +1513,7 @@ namespace mongo {
     }
 
     void ExpressionFieldRange::addToBsonObj(
-        BSONObjBuilder *pBuilder, string fieldName,
+        BSONObjBuilder *pBuilder, const std::string& fieldName,
         bool requireExpression) const {
         BuilderObj builder(pBuilder, fieldName);
         addToBson(&builder);
@@ -1576,9 +1593,7 @@ namespace mongo {
         pBottom(),
         pTop() {
         switch(cmpOp) {
-        case NE:
-            bottomOpen = topOpen = true;
-            /* FALLTHROUGH */
+
         case EQ:
             pBottom = pTop = pValue;
             break;
@@ -1599,6 +1614,7 @@ namespace mongo {
             pTop = pValue;
             break;
 
+        case NE:
         case CMP:
             verify(false); // not allowed
             break;
@@ -1620,7 +1636,7 @@ namespace mongo {
         pBottom(pTheBottom),
         pTop(pTheTop) {
     }
-        
+
     ExpressionFieldRange::Range *ExpressionFieldRange::Range::intersect(
         const Range *pRange) const {
         /*
@@ -2123,7 +2139,7 @@ namespace mongo {
     }
 
     void ExpressionNary::addToBsonObj(
-        BSONObjBuilder *pBuilder, string fieldName,
+        BSONObjBuilder *pBuilder, const std::string& fieldName,
         bool requireExpression) const {
         BSONObjBuilder exprBuilder;
         toBson(&exprBuilder, getOpName());
@@ -2229,7 +2245,7 @@ namespace mongo {
         /* optimize the disjunction as much as possible */
         intrusive_ptr<Expression> pE(ExpressionNary::optimize());
 
-        /* if the result isn't a conjunction, we can't do anything */
+        /* if the result isn't a disjunction, we can't do anything */
         ExpressionOr *pOr = dynamic_cast<ExpressionOr *>(pE.get());
         if (!pOr)
             return pE;
@@ -2240,6 +2256,8 @@ namespace mongo {
           we can do.
         */
         const size_t n = pOr->vpOperand.size();
+        // ExpressionNary::optimize() generates an ExpressionConstant for {$or:[]}.
+        verify(n > 0);
         intrusive_ptr<Expression> pLast(pOr->vpOperand[n - 1]);
         const ExpressionConstant *pConst =
             dynamic_cast<ExpressionConstant *>(pLast.get());

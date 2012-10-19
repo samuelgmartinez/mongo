@@ -16,12 +16,14 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "pch.h"
-#include "btree.h"
-#include "pdfile.h"
-#include "jsobj.h"
-#include "curop-inl.h"
-#include "queryutil.h"
+#include "mongo/pch.h"
+
+#include "mongo/db/btree.h"
+#include "mongo/db/curop-inl.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/kill_current_op.h"
+#include "mongo/db/pdfile.h"
+#include "mongo/db/queryutil.h"
 
 namespace mongo {
 
@@ -221,20 +223,20 @@ namespace mongo {
         NamespaceDetails *d, int idxNo, const IndexDetails& id, 
         const BSONObj &startKey, const BSONObj &endKey, bool endKeyInclusive, int direction) 
     { 
-        BtreeCursor *c = make( d , idxNo , id );
+        auto_ptr<BtreeCursor> c( make( d , idxNo , id ) );
         c->init(startKey,endKey,endKeyInclusive,direction);
         c->initWithoutIndependentFieldRanges();
         dassert( c->_dups.size() == 0 );
-        return c;
+        return c.release();
     }
 
     BtreeCursor* BtreeCursor::make(
         NamespaceDetails *d, int idxNo, const IndexDetails& id, 
         const shared_ptr< FieldRangeVector > &bounds, int singleIntervalLimit, int direction )
     {
-        BtreeCursor *c = make( d , idxNo , id );
+        auto_ptr<BtreeCursor> c( make( d , idxNo , id ) );
         c->init(bounds,singleIntervalLimit,direction);
-        return c;
+        return c.release();
     }
 
     BtreeCursor::BtreeCursor( NamespaceDetails* nsd , int theIndexNo, const IndexDetails& id ) 

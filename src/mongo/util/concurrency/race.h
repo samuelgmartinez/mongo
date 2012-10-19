@@ -1,3 +1,19 @@
+/**
+*    Copyright (C) 2012 10gen Inc.
+*
+*    This program is free software: you can redistribute it and/or  modify
+*    it under the terms of the GNU Affero General Public License, version 3,
+*    as published by the Free Software Foundation.
+*
+*    This program is distributed in the hope that it will be useful,
+*    but WITHOUT ANY WARRANTY; without even the implied warranty of
+*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+*    GNU Affero General Public License for more details.
+*
+*    You should have received a copy of the GNU Affero General Public License
+*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
 #pragma once
 
 #include "../goodies.h" // printStackTrace
@@ -48,7 +64,7 @@ namespace mongo {
                 if( --n != 0 ) fail();
             }
         public:
-            Block(string f, unsigned l) : n(0), ncalls(0), file(f), line(l) { }
+            Block(const std::string& f, unsigned l) : n(0), ncalls(0), file(f), line(l) { }
             ~Block() { 
                 if( ncalls > 1000000 ) { 
                     // just so we know if we are slowing things down

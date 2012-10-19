@@ -1,6 +1,7 @@
 // mr.cpp
 
 /**
+ *    Copyright (C) 2012 10gen Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -28,6 +29,7 @@
 #include "../../s/d_chunk_manager.h"
 #include "../../s/d_logic.h"
 #include "../../s/grid.h"
+#include "mongo/db/kill_current_op.h"
 
 #include "mr.h"
 
@@ -37,7 +39,7 @@ namespace mongo {
 
         AtomicUInt Config::JOB_NUMBER;
 
-        JSFunction::JSFunction( string type , const BSONElement& e ) {
+        JSFunction::JSFunction( const std::string& type , const BSONElement& e ) {
             _type = type;
             _code = e._asCode();
 
@@ -1024,7 +1026,7 @@ namespace mongo {
 
                 uassert( 16149 , "cannot run map reduce without the js engine", globalScriptEngine );
 
-                auto_ptr<ClientCursor> holdCursor;
+                ClientCursor::Holder holdCursor;
                 ShardChunkManagerPtr chunkManager;
 
                 {
@@ -1040,8 +1042,8 @@ namespace mongo {
                     // Get a very basic cursor, prevents deletion of migrated data while we m/r
                     shared_ptr<Cursor> temp = NamespaceDetailsTransient::getCursor( config.ns.c_str(), BSONObj(), BSONObj() );
                     uassert( 15876, str::stream() << "could not create cursor over " << config.ns << " to hold data while prepping m/r", temp.get() );
-                    holdCursor = auto_ptr<ClientCursor>( new ClientCursor( QueryOption_NoCursorTimeout , temp , config.ns.c_str() ) );
-                    uassert( 15877, str::stream() << "could not create m/r holding client cursor over " << config.ns, holdCursor.get() );
+                    holdCursor.reset( new ClientCursor( QueryOption_NoCursorTimeout , temp , config.ns.c_str() ) );
+                    uassert( 15877, str::stream() << "could not create m/r holding client cursor over " << config.ns, holdCursor );
 
                 }
 
@@ -1307,7 +1309,8 @@ namespace mongo {
 
                     // reduce from each shard for a chunk
                     BSONObj sortKey = BSON( "_id" << 1 );
-                    ParallelSortClusteredCursor cursor( servers , inputNS , Query( query ).sort( sortKey ) );
+                    ParallelSortClusteredCursor cursor(servers, inputNS,
+                            Query(query).sort(sortKey), QueryOption_NoCursorTimeout);
                     cursor.init();
                     int chunkSize = 0;
 
