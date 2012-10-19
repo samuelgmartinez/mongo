@@ -193,6 +193,9 @@ namespace mongo {
             ShardForceVersionOkModeBlock sf;
             {
                 RemoveSaver rs("moveChunk",ns,"post-cleanup");
+
+                log() << "moveChunk starting delete for: " << this->toString() << migrateLog;
+
                 long long numDeleted =
                         Helpers::removeRange( ns ,
                                               min ,
@@ -202,7 +205,9 @@ namespace mongo {
                                               secondaryThrottle ,
                                               cmdLine.moveParanoia ? &rs : 0 , /*callback*/
                                               true ); /*fromMigrate*/
-                log() << "moveChunk deleted: " << numDeleted << migrateLog;
+
+                log() << "moveChunk deleted " << numDeleted << " documents for "
+                      << this->toString() << migrateLog;
             }
             
             
@@ -260,7 +265,13 @@ namespace mongo {
                     const BSONObj& min ,
                     const BSONObj& max ,
                     const BSONObj& shardKeyPattern ) {
-            scoped_lock ll(_workLock);
+
+            //
+            // Do not hold _workLock
+            //
+
+            //scoped_lock ll(_workLock);
+
             scoped_lock l(_m); // reads and writes _active
 
             verify( ! _active );
@@ -329,7 +340,7 @@ namespace mongo {
 
             case 'd': {
 
-                if ( getThreadName() == cleanUpThreadName ) {
+                if (getThreadName().find(cleanUpThreadName) == 0) {
                     // we don't want to xfer things we're cleaning
                     // as then they'll be deleted on TO
                     // which is bad
@@ -437,9 +448,9 @@ namespace mongo {
                 errmsg = (string)"can't find index in storeCurrentLocs" + causedBy( errmsg );
                 return false;
             }
-
+            // Assume both min and max non-empty, append MinKey's to make them fit chosen index
             BSONObj min = Helpers::modifiedRangeBound( _min , idx->keyPattern() , -1 );
-            BSONObj max = Helpers::modifiedRangeBound( _max , idx->keyPattern() , 1 );
+            BSONObj max = Helpers::modifiedRangeBound( _max , idx->keyPattern() , -1 );
 
             BtreeCursor* btreeCursor = BtreeCursor::make( d , *idx , min , max , false , 1 );
             auto_ptr<ClientCursor> cc(
@@ -662,11 +673,16 @@ namespace mongo {
     };
 
     void _cleanupOldData( OldDataCleanup cleanup ) {
-        Client::initThread( cleanUpThreadName );
+
+        Client::initThread((string(cleanUpThreadName) + string("-") +
+                                                        OID::gen().toString()).c_str());
+
         if (!noauth) {
             cc().getAuthenticationInfo()->authorize("local", internalSecurity.user);
         }
-        log() << " (start) waiting to cleanup " << cleanup << "  # cursors:" << cleanup.initial.size() << migrateLog;
+
+        log() << " (start) waiting to cleanup " << cleanup
+              << ", # cursors remaining: " << cleanup.initial.size() << migrateLog;
 
         int loops = 0;
         Timer t;
@@ -1006,7 +1022,8 @@ namespace mongo {
                                                     res );
                 }
                 catch( DBException& e ){
-                    errmsg = str::stream() << "moveChunk could not contact to: shard " << to << " to start transfer" << causedBy( e );
+                    errmsg = str::stream() << "moveChunk could not contact to: shard "
+                                           << to << " to start transfer" << causedBy( e );
                     warning() << errmsg << endl;
                     return false;
                 }
@@ -1018,6 +1035,7 @@ namespace mongo {
                     verify( res["errmsg"].type() );
                     errmsg += res["errmsg"].String();
                     result.append( "cause" , res );
+                    warning() << errmsg << endl;
                     return false;
                 }
 
@@ -1678,10 +1696,16 @@ namespace mongo {
                         }
                     }
 
+                    // id object most likely has form { _id : ObjectId(...) }
+                    // infer from that correct index to use, e.g. { _id : 1 }
+                    BSONObj idIndexPattern;
+                    Helpers::toKeyFormat( id , idIndexPattern );
+
+                    // TODO: create a better interface to remove objects directly
                     Helpers::removeRange( ns ,
                                           id ,
                                           id,
-                                          findShardKeyIndexPattern_locked( ns , shardKeyPattern ), 
+                                          idIndexPattern ,
                                           true , /*maxInclusive*/
                                           false , /* secondaryThrottle */
                                           cmdLine.moveParanoia ? &rs : 0 , /*callback*/
@@ -1843,9 +1867,26 @@ namespace mongo {
             migrateStatus.from = cmdObj["from"].String();
             migrateStatus.min = cmdObj["min"].Obj().getOwned();
             migrateStatus.max = cmdObj["max"].Obj().getOwned();
-            migrateStatus.shardKeyPattern = cmdObj["shardKeyPattern"].Obj().getOwned();
             migrateStatus.secondaryThrottle = cmdObj["secondaryThrottle"].trueValue();
-            
+            if (cmdObj.hasField("shardKeyPattern")) {
+                migrateStatus.shardKeyPattern = cmdObj["shardKeyPattern"].Obj().getOwned();
+            } else {
+                // shardKeyPattern may not be provided if another shard is from pre 2.2
+                // In that case, assume the shard key pattern is the same as the range
+                // specifiers provided.
+                BSONObj keya , keyb;
+                Helpers::toKeyFormat( migrateStatus.min , keya );
+                Helpers::toKeyFormat( migrateStatus.max , keyb );
+                verify( keya == keyb );
+
+                warning() << "No shard key pattern provided by source shard for migration."
+                    " This is likely because the source shard is running a version prior to 2.2."
+                    " Falling back to assuming the shard key matches the pattern of the min and max"
+                    " chunk range specifiers.  Inferred shard key: " << keya << endl;
+
+                migrateStatus.shardKeyPattern = keya.getOwned();
+            }
+
             if ( migrateStatus.secondaryThrottle && ! anyReplEnabled() ) {
                 warning() << "secondaryThrottle asked for, but not replication" << endl;
                 migrateStatus.secondaryThrottle = false;

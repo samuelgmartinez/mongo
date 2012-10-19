@@ -84,10 +84,7 @@ namespace mongo {
         log() << "replSet See http://dochub.mongodb.org/core/resyncingaverystalereplicasetmember" << rsLog;
 
         // reset minvalid so that we can't become primary prematurely
-        {
-            Lock::DBWrite lk("local.replset.minvalid");
-            Helpers::putSingleton("local.replset.minvalid", oldest);
-        }
+        setMinValid(oldest);
 
         sethbmsg("error RS102 too stale to catch up");
         changeState(MemberState::RS_RECOVERING);
@@ -426,6 +423,7 @@ namespace mongo {
         ghost(0),
         _writerPool(replWriterThreadCount),
         _prefetcherPool(replPrefetcherThreadCount),
+        oplogVersion(0),
         _indexPrefetchConfig(PREFETCH_ALL) {
     }
 
@@ -838,5 +836,13 @@ namespace mongo {
         cc().getAuthenticationInfo()->authorize("local","_repl");
     }
     
+    void ReplSetImpl::setMinValid(BSONObj obj) {
+        BSONObjBuilder builder;
+        builder.appendTimestamp("ts", obj["ts"].date());
+        builder.append("h", obj["h"]);
+        Lock::DBWrite cx( "local" );
+        Helpers::putSingleton("local.replset.minvalid", builder.obj());
+    }
+
 }
 

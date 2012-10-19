@@ -1249,8 +1249,9 @@ namespace mongo {
                     errmsg = "couldn't find valid index containing key pattern";
                     return false;
                 }
+                // If both min and max non-empty, append MinKey's to make them fit chosen index
                 min = Helpers::modifiedRangeBound( min , idx->keyPattern() , -1 );
-                max = Helpers::modifiedRangeBound( max , idx->keyPattern() , 1 );
+                max = Helpers::modifiedRangeBound( max , idx->keyPattern() , -1 );
 
                 c.reset( BtreeCursor::make( d, d->idxNo(*idx), *idx, min, max, false, 1 ) );
             }
@@ -1908,12 +1909,11 @@ namespace mongo {
                 BSONObj authObj = cmdObj[AuthenticationTable::fieldName].Obj();
                 ai->setTemporaryAuthorization( authObj );
             } else {
-                result.append( "errmsg" ,
-                               "unauthorized: no auth credentials provided for command and "
-                               "authenticated using internal user.  This is most likely because "
-                               "you are using an old version of mongos" );
-                log() << "command denied: " << cmdObj.toString() << endl;
-                return false;
+                SOMETIMES ( noAuthTableCounter, 1000 ) {
+                    warning() << "Received command without $auth table.  This is probably because "
+                        "you are running with 1 or more mongod or mongos nodes that are running a "
+                        "version prior to 2.2.  Command object: " << cmdObj.toString() << endl;
+                }
             }
         }
 

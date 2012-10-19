@@ -268,7 +268,12 @@ namespace mongo {
                                     bool secondaryThrottle ,
                                     RemoveCallback * callback,
                                     bool fromMigrate ) {
-        
+
+        Timer rangeRemoveTimer;
+
+        LOG(1) << "begin removal of " << min << " to " << max << " in " << ns
+               << (secondaryThrottle ? " (waiting for secondaries)" : "" ) << endl;
+
         Client& c = cc();
 
         long long numDeleted = 0;
@@ -293,8 +298,12 @@ namespace mongo {
                     
                     IndexDetails& i = nsd->idx( ii );
 
+                    // Extend min to get (min, MinKey, MinKey, ....)
                     BSONObj newMin = Helpers::modifiedRangeBound( min , keyPattern , -1 );
-                    BSONObj newMax = Helpers::modifiedRangeBound( max , keyPattern , 1 );
+                    // If upper bound is included, extend max to get (max, MaxKey, MaxKey, ...)
+                    // If not included, extend max to get (max, MinKey, MinKey, ....)
+                    int minOrMax = maxInclusive ? 1 : -1;
+                    BSONObj newMax = Helpers::modifiedRangeBound( max , keyPattern , minOrMax );
                     
                     c.reset( BtreeCursor::make( nsd , ii , i , newMin , newMax , maxInclusive , 1 ) );
                 }
@@ -345,6 +354,9 @@ namespace mongo {
             log() << "Helpers::removeRangeUnlocked time spent waiting for replication: "  
                   << millisWaitingForReplication << "ms" << endl;
         
+        LOG(1) << "end removal of " << min << " to " << max << " in " << ns
+               << " (took " << rangeRemoveTimer.millis() << "ms)" << endl;
+
         return numDeleted;
     }
 
