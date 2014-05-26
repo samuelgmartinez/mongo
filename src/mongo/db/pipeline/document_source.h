@@ -187,7 +187,7 @@ namespace mongo {
          */
         virtual void addToBsonArray(BSONArrayBuilder *pBuilder,
             bool explain = false) const;
-        
+
     protected:
         /**
            Base constructor.
@@ -294,7 +294,7 @@ namespace mongo {
         bool haveCurrent;
     };
 
-    
+
     class DocumentSourceCommandShards :
         public DocumentSource {
     public:
@@ -595,7 +595,7 @@ namespace mongo {
 
         /**
           Create a new grouping DocumentSource.
-          
+
           @param pExpCtx the expression context for the pipeline
           @returns the DocumentSource
          */
@@ -781,7 +781,7 @@ namespace mongo {
             const intrusive_ptr<ExpressionContext> &pExpCtx);
     };
 
-    
+
     class DocumentSourceProject :
         public DocumentSource {
     public:
@@ -842,6 +842,8 @@ namespace mongo {
         virtual const char *getSourceName() const;
         virtual intrusive_ptr<Document> getCurrent();
 
+        virtual bool coalesce(const intrusive_ptr<DocumentSource> &pNextSource);
+
         virtual GetDepsReturn getDependencies(set<string>& deps) const;
 
         /*
@@ -852,7 +854,7 @@ namespace mongo {
 
         /**
           Create a new sorting DocumentSource.
-          
+
           @param pExpCtx the expression context for the pipeline
           @returns the DocumentSource
          */
@@ -863,7 +865,7 @@ namespace mongo {
         // All work for sort is done in router currently
         // TODO: do partial sorts on the shards then merge in the router
         //       Not currently possible due to DocumentSource's cursor-like interface
-        virtual intrusive_ptr<DocumentSource> getShardSource() { return NULL; }
+        virtual intrusive_ptr<DocumentSource> getShardSource();
         virtual intrusive_ptr<DocumentSource> getRouterSource() { return this; }
 
         /**
@@ -903,6 +905,8 @@ namespace mongo {
 
 
         static const char sortName[];
+        static const char limitName[];
+        static const char skipName[];
 
     protected:
         // virtuals from DocumentSource
@@ -910,6 +914,8 @@ namespace mongo {
 
     private:
         DocumentSourceSort(const intrusive_ptr<ExpressionContext> &pExpCtx);
+
+        intrusive_ptr<ExpressionContext> pExpCtx;
 
         /*
           Before returning anything, this source must fetch everything from
@@ -961,12 +967,16 @@ namespace mongo {
 
         VectorType::iterator docIterator;
         intrusive_ptr<Document> pCurrent;
+        long long skip;
+        long long limit;
     };
 
 
     class DocumentSourceLimit :
         public DocumentSource {
     public:
+        long long limit;
+
         // virtuals from DocumentSource
         virtual ~DocumentSourceLimit();
         virtual bool eof();
@@ -1013,7 +1023,6 @@ namespace mongo {
         DocumentSourceLimit(
             const intrusive_ptr<ExpressionContext> &pExpCtx);
 
-        long long limit;
         long long count;
         intrusive_ptr<Document> pCurrent;
     };
@@ -1021,6 +1030,8 @@ namespace mongo {
     class DocumentSourceSkip :
         public DocumentSource {
     public:
+        long long skip;
+
         // virtuals from DocumentSource
         virtual ~DocumentSourceSkip();
         virtual bool eof();
@@ -1071,7 +1082,6 @@ namespace mongo {
          */
         void skipper();
 
-        long long skip;
         long long count;
         intrusive_ptr<Document> pCurrent;
     };
@@ -1149,7 +1159,7 @@ namespace mongo {
     inline int DocumentSource::getPipelineStep() const {
         return step;
     }
-    
+
     inline void DocumentSourceGroup::setIdExpression(
         const intrusive_ptr<Expression> &pExpression) {
         pIdExpression = pExpression;

@@ -312,11 +312,15 @@ namespace mongo {
                 intrusive_ptr<DocumentSource> shardSource  = splittable->getShardSource();
                 intrusive_ptr<DocumentSource> routerSource = splittable->getRouterSource();
                 if (shardSource) pShardPipeline->sourceVector.push_back(shardSource);
-                if (routerSource)          this->sourceVector.push_back(routerSource);
 
-                // put the sourceVector back in the correct order and exit the loop
-                reverse(sourceVector.begin(), sourceVector.end());
-                break;
+                if (routerSource) {
+                    this->sourceVector.push_back(routerSource);
+
+                    log() << "se debe parar porque hay que partir la operacion" << endl;
+                    // put the sourceVector back in the correct order and exit the loop
+                    reverse(sourceVector.begin(), sourceVector.end());
+                    break;
+                }
             }
         }
 

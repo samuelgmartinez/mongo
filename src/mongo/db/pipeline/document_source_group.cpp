@@ -435,7 +435,7 @@ namespace mongo {
                 }
             }
         }
-        
+
         intrusive_ptr<ExpressionContext> pMergerExpCtx = pExpCtx->clone();
         pMergerExpCtx->setDoingMerge(true);
         intrusive_ptr<DocumentSourceGroup> pMerger(DocumentSourceGroup::create(pMergerExpCtx));

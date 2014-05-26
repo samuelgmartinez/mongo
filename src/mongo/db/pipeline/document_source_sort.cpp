@@ -14,6 +14,10 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <stdint.h>
+#include <iostream>
+#include <queue>
+
 #include "pch.h"
 
 #include "db/pipeline/document_source.h"
@@ -28,6 +32,62 @@
 
 namespace mongo {
     const char DocumentSourceSort::sortName[] = "$sort";
+    const char DocumentSourceSort::limitName[] = "$limit";
+    const char DocumentSourceSort::skipName[] = "$skip";
+
+    template <class T, class Compare = std::less<T> >
+    class bounded_priority_queue {
+        private:
+            unsigned long max_size;
+            Compare comp;
+            std::priority_queue<T, std::vector<T>, Compare> queue;
+        public:
+            bounded_priority_queue(long max_size) :
+            max_size(max_size)
+            {
+
+            }
+            bounded_priority_queue(long max_size, Compare comparator) :
+            max_size(max_size),
+            comp(comparator),
+            queue(comparator)
+            {
+
+            }
+            bool push(T element) {
+                if(queue.size() >= max_size) {
+                    if(comp(element, queue.top())) {
+                        queue.pop();
+                        queue.push(element);
+
+                        return true;
+                    }
+                }
+                else {
+                    queue.push(element);
+
+                    return true;
+                }
+
+                return false;
+            }
+
+            std::vector<T> elements() {
+                std::vector<T> elements(queue.size());
+
+                for(int i=queue.size()-1; i>=0 ; i--) {
+                    T topElem = queue.top();
+                    queue.pop();
+                    elements[i] = topElem;
+                }
+
+                return elements;
+            }
+
+            int size() {
+                return queue.size();
+            }
+    };
 
     DocumentSourceSort::~DocumentSourceSort() {
     }
@@ -43,6 +103,30 @@ namespace mongo {
         return (docIterator == documents.end());
     }
 
+    bool DocumentSourceSort::coalesce(
+        const intrusive_ptr<DocumentSource> &pNextSource) {
+        DocumentSourceLimit *pLimit =
+            dynamic_cast<DocumentSourceLimit *>(pNextSource.get());
+
+        if(pLimit) {
+            limit = pLimit->limit;
+            log() << "sort: limit " << limit << endl;
+
+            return true;
+        }
+        else {
+            DocumentSourceSkip *pSkip =
+                dynamic_cast<DocumentSourceSkip *>(pNextSource.get());
+            if(pSkip) {
+                skip += pSkip->skip;
+                log() << "sort: skip " << skip << endl;
+
+                return true;
+            }
+        }
+
+        return false;
+    }
     bool DocumentSourceSort::advance() {
         DocumentSource::advance(); // check for interrupts
 
@@ -72,6 +156,15 @@ namespace mongo {
         BSONObjBuilder *pBuilder, bool explain) const {
         BSONObjBuilder insides;
         sortKeyToBson(&insides, false);
+
+        //add the $limit and $skip if it is needed
+        if(limit) {
+            insides.append(DocumentSourceSort::limitName, limit);
+        }
+        if(skip) {
+            insides.append(DocumentSourceSort::skipName, skip);
+        }
+
         pBuilder->append(sortName, insides.done());
     }
 
@@ -85,7 +178,10 @@ namespace mongo {
     DocumentSourceSort::DocumentSourceSort(
         const intrusive_ptr<ExpressionContext> &pExpCtx):
         SplittableDocumentSource(pExpCtx),
-        populated(false) {
+        pExpCtx(pExpCtx),
+        populated(false),
+        skip(0),
+        limit(0) {
     }
 
     void DocumentSourceSort::addKey(const string &fieldPath, bool ascending) {
@@ -134,18 +230,28 @@ namespace mongo {
             BSONElement keyField(keyIterator.next());
             const char *pKeyFieldName = keyField.fieldName();
             int sortOrder = 0;
-                
-            uassert(15974, str::stream() << sortName <<
-                    " key ordering must be specified using a number",
-                    keyField.isNumber());
-            sortOrder = (int)keyField.numberInt();
 
-            uassert(15975,  str::stream() << sortName <<
-                    " key ordering must be 1 (for ascending) or -1 (for descending",
-                    ((sortOrder == 1) || (sortOrder == -1)));
+            if(strcmp(pKeyFieldName, DocumentSourceSort::limitName) == 0) {
+                pSort->limit = (int)keyField.numberInt();
+                log() << "$limit" << pSort->limit << endl;
+            }
+            else if(strcmp(pKeyFieldName, DocumentSourceSort::skipName) == 0) {
+                pSort->skip = (int)keyField.numberInt();
+                log() << "$skip: " << pSort->skip  << endl;
+            }
+            else {
+                uassert(15974, str::stream() << sortName <<
+                        " key ordering must be specified using a number",
+                        keyField.isNumber());
+                sortOrder = (int)keyField.numberInt();
 
-            pSort->addKey(pKeyFieldName, (sortOrder > 0));
-            ++sortKeys;
+                uassert(15975,  str::stream() << sortName <<
+                        " key ordering must be 1 (for ascending) or -1 (for descending",
+                        ((sortOrder == 1) || (sortOrder == -1)));
+
+                pSort->addKey(pKeyFieldName, (sortOrder > 0));
+                ++sortKeys;
+            }
         }
 
         uassert(15976, str::stream() << sortName <<
@@ -160,22 +266,41 @@ namespace mongo {
 
         /* track and warn about how much physical memory has been used */
         DocMemMonitor dmm(this);
+        Comparator comparator(this);
 
-        /* pull everything from the underlying source */
-        for(bool hasNext = !pSource->eof(); hasNext;
-            hasNext = pSource->advance()) {
-            intrusive_ptr<Document> pDocument(pSource->getCurrent());
-            documents.push_back(pDocument);
+        if(limit) {
+            bounded_priority_queue<intrusive_ptr<Document>, Comparator> queue(limit+skip, comparator);
+            for(bool hasNext = !pSource->eof(); hasNext;
+                hasNext = pSource->advance()) {
+                intrusive_ptr<Document> pDocument(pSource->getCurrent());
+                queue.push(pDocument);
 
-            dmm.addToTotal(pDocument->getApproximateSize());
+                dmm.addToTotal(pDocument->getApproximateSize());
+            }
+
+            documents = queue.elements();
+        }
+        else {
+            /* pull everything from the underlying source */
+            for(bool hasNext = !pSource->eof(); hasNext;
+                hasNext = pSource->advance()) {
+                intrusive_ptr<Document> pDocument(pSource->getCurrent());
+                documents.push_back(pDocument);
+
+                dmm.addToTotal(pDocument->getApproximateSize());
+            }
+
+            /* sort the list */
+            sort(documents.begin(), documents.end(), comparator);
         }
 
-        /* sort the list */
-        Comparator comparator(this);
-        sort(documents.begin(), documents.end(), comparator);
-
         /* start the sort iterator */
-        docIterator = documents.begin();
+        if((unsigned long long)skip >= documents.size()) {
+            docIterator = documents.end();
+        }
+        else {
+            docIterator = documents.begin() + skip;
+        }
 
         if (docIterator != documents.end())
             pCurrent = *docIterator;
@@ -218,5 +343,14 @@ namespace mongo {
           consider the documents equal for purposes of this sort.
         */
         return 0;
+    }
+
+    intrusive_ptr<DocumentSource> DocumentSourceSort::getShardSource() {
+        intrusive_ptr<DocumentSourceSort> pSort(DocumentSourceSort::create(this->pExpCtx));
+        pSort->vSortKey = this->vSortKey;
+        pSort->vAscending = this->vAscending;
+        pSort->limit = this->limit + this->skip;
+
+        return pSort;
     }
 }

@@ -25,6 +25,7 @@
 #include <fcntl.h>
 #include <sys/statvfs.h>
 #endif
+#include <stdint.h>
 #include "text.h"
 
 namespace mongo {
@@ -91,7 +92,7 @@ namespace mongo {
         }
         static boost::intmax_t freeSpace(const string &path) {
             ULARGE_INTEGER avail;
-            if( GetDiskFreeSpaceEx(toNativeString(path.c_str()).c_str(), &avail, NULL, NULL) ) { 
+            if( GetDiskFreeSpaceEx(toNativeString(path.c_str()).c_str(), &avail, NULL, NULL) ) {
                 return avail.QuadPart;
             }
             DWORD e = GetLastError();
@@ -173,9 +174,9 @@ namespace mongo {
 
         void open(const char *filename, bool readOnly=false , bool direct=false) {
             fd = ::open(filename,
-                        O_CREAT | ( readOnly ? 0 : ( O_RDWR | O_NOATIME ) ) 
+                        O_CREAT | ( readOnly ? 0 : ( O_RDWR | O_NOATIME ) )
 #if defined(O_DIRECT)
-                        | ( direct ? O_DIRECT : 0 ) 
+                        | ( direct ? O_DIRECT : 0 )
 #endif
                         ,
                         S_IRUSR | S_IWUSR);
@@ -193,7 +194,7 @@ namespace mongo {
             if( s == -1 ) {
                 err(false);
             }
-            else if( s != (int) len ) { 
+            else if( s != (int) len ) {
                 _bad = true;
                 log() << "File error read:" << s << " bytes, wanted:" << len << " ofs:" << o << endl;
             }
